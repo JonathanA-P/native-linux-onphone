@@ -1,6 +1,18 @@
 # Native Linux on Phone (Samsung Galaxy A70 — `a70q` / `SM-A705F`)
 
+> [!WARNING]
+> ### DISCLAIMER & EXPERIMENTAL STATUS
+> **PROCEED AT YOUR OWN RISK.** This project is an advanced, bare-metal research port of Linux onto an Android smartphone platform. Following the guides, flashing partition tables, or executing scripts in this repository carries real risks, including **permanent hardware brick, bootloops, bootloader lockouts, or irreversible data loss**.
+> 
+> * **NO GUARANTEE OF SUCCESS:** Hardware components on the Samsung Galaxy A70 vary significantly across production batches and regional variants (`SM-A705F`, `SM-A705FN`, `SM-A705GM`, `SM-A705MN`, `SM-A7050`, `SM-A705W`). Crucially, **aftermarket replacement screens** (such as TFT/INCELL panels with non-standard I2C/SPI bridge controllers) behave completely differently from OEM Super AMOLED panels (`S6E3FC2_AMS670TA01_FHD`).
+> * **MANUAL ADJUSTMENTS REQUIRED:** Depending on your bootloader version (e.g., Knox S-Boot Rev 1 through Rev 5 / U5), DRAM vendor, and touchscreen digitizer revision, you will need to adapt device tree overlays (DTBO), kernel command-line arguments, and driver timings. This is **not a one-click flash-and-play ROM**.
+> * **BACKUP MANDATORY:** Under no circumstances should you proceed without taking full raw block-level backups (`dd` or TWRP/OrangeFox raw partition backups) of `/dev/block/sda`, `boot`, `dtbo`, `recovery`, `efs`, and `userdata`. The authors assume zero liability for any damage to your hardware or loss of data.
+
+---
+
 Genuine bare-metal **Debian GNU/Linux 13 (Trixie)** port for the **Samsung Galaxy A70** (`SM-A705F` / `a70q`), featuring full `systemd` PID 1, custom dual-boot initramfs, **Phosh** Wayland mobile environment, Qualcomm Adreno 612 hardware acceleration via **Turnip Vulkan + Zink**, and headless USB gadget connectivity (CDC-NCM Ethernet + CDC-ACM serial root console).
+
+For the exhaustive trial-by-trial engineering journal, read [docs/EXPERIMENTAL_RESEARCH_LOGS.md](file:///home/jonathan/Documents/Projects/Apps/a70/native-linux/docs/EXPERIMENTAL_RESEARCH_LOGS.md).
 
 ---
 
@@ -38,6 +50,49 @@ Genuine bare-metal **Debian GNU/Linux 13 (Trixie)** port for the **Samsung Galax
 
 ---
 
+## The Engineering Journey: Trials, Failures & Breakthroughs
+
+Bringing desktop Linux onto a modern Qualcomm Snapdragon smartphone is not a simple userland chroot. It requires navigating kernel constraints, driver omissions, and bootloader quirks:
+
+### 1. The Partition Boundary & Non-Destructive Dual-Boot
+* **Trial:** Installing native Linux without erasing the user's primary Android ROM (crDroid 13 / LineageOS 20).
+* **Breakthrough:** Discovered an unallocated 77GB LUN partition on `/dev/block/sda30`. Formatted it as pure `ext4`, leaving `/dev/block/sda29` (crDroid F2FS userdata) 100% untouched.
+
+### 2. Samsung S-Boot DTBO Validation Header
+* **Trial:** Flashing generic `boot.img` resulted in immediate bootloops.
+* **Root Cause:** Samsung Knox S-Boot Rev 5 (`A705FXXU5DXD2`) verifies the device tree overlay table (`dtbo.img`, magic `0x1eabb7d7`). Missing matching overlays for SM6150 revision 13 halts bootloader handover.
+* **Breakthrough:** Extracted and injected the LineageOS DTBO table (`2,499,651` bytes) with relative offset calculation (`0x1d8e000`).
+
+### 3. Early UART MMIO Bus Fault
+* **Trial:** Setting `earlycon=msm_geni_serial,0x880000` halted boot instantly.
+* **Root Cause:** Qualcomm SM6150 GENI serial clocks are disabled prior to kernel clock provider initialization. Accessing unclocked MMIO registers triggers ARM64 EL1 hardware faults.
+* **Fix:** Stripped `earlycon`, passed `console=null nokaslr printk.devkmsg=on`.
+
+### 4. Qualcomm Wi-Fi Driver Kernel Panic (`qcacld-3.0`)
+* **Trial:** Triggering `echo 1 > /sys/kernel/boot_wlan/boot_wlan` on early boot.
+* **Root Cause:** Vendor driver `qcacld-3.0` was compiled with `+PANIC_ON_BUG`. Triggering WLAN before regulatory domains and firmware are loaded by userspace caused fatal kernel panic and EDL crash.
+* **Fix:** Deferred and isolated WLAN initialization out of the critical boot path.
+
+### 5. Adreno 612 GPU Acceleration over KGSL (Turnip + Zink)
+* **Trial:** Bypassing `llvmpipe` CPU software rendering without upstream DRM MSM.
+* **Breakthrough:** Utilized Mesa Turnip's native KGSL backend (`TU_DEBUG=kgsl`) communicating directly with `/dev/kgsl-3d0`. Placed physical firmware (`a612_zap.mdt`, `a630_sqe.fw`), adjusted udev permissions (`chmod 666 /dev/kgsl-3d0 /dev/ion`), and layered Zink OpenGL ES (`MESA_LOADER_DRIVER_OVERRIDE=zink`) on top. Confirmed native acceleration: `GPU: Qualcomm Turnip Adreno (TM) 612 [Integrated]`.
+
+### 6. The `seatd` Virtual Terminal Timeout Trap
+* **Trial:** Starting Phosh compositor (`phoc`).
+* **Root Cause:** `phoc` linked to `libseat`. Because package `seatd` was installed, `libseat` defaulted to `seatd`. But `seatd` strictly requires Linux Virtual Terminals (`/dev/tty0`, `/dev/tty1`, `CONFIG_VT`), which downstream Android kernels disable. `seatd` waited 10s, timed out, and caused `phoc` to crash.
+* **Breakthrough:** Completely masked `seatd.service` and forced `LIBSEAT_BACKEND=logind`. `systemd-logind` manages DRM and input directly via DBus without virtual terminals.
+
+### 7. Hardware Cursor Display Blackout
+* **Trial:** Mutter / GNOME Shell page flipping.
+* **Root Cause:** Qualcomm's downstream KMS driver (`sde_kms`) does not implement hardware cursor planes. Mutter calling KMS `drmModeSetCursor` failed with `-ENXIO`, causing the page flip to fail and triggering display power-off (`dsi_display_disable`).
+* **Breakthrough:** Exported `WLR_NO_HARDWARE_CURSORS=1` and `MUTTER_DEBUG_DISABLE_HW_CURSORS=1`. Cursors render in software; panel remains alive.
+
+### 8. Zero-Touch Mobile Adaptation
+* **Trial:** User lockout on GDM greeter due to unscaled DPI and missing on-screen keyboard.
+* **Breakthrough:** Configured 2x Phoc scaling (`[output:DSI-1] scale = 2`), PAM passwordless authentication, GDM autologin into Phosh, and disabled screen lock via dconf.
+
+---
+
 ## Architecture Overview
 
 ```
@@ -66,15 +121,6 @@ Genuine bare-metal **Debian GNU/Linux 13 (Trixie)** port for the **Samsung Galax
 +---------------------------------------------------------------+
 ```
 
-### 1. Dual-Boot & Partition Strategy
-* **Non-Destructive Coexistence:** The stock Android userdata partition (`/dev/block/sda29`) remains untouched.
-* **Dedicated Linux Partition:** Debian resides on `/dev/block/sda30` formatted as native `ext4`.
-* **Stage 1 Bootloader:** A custom statically-linked C initramfs (`initramfs/dualboot_init.c`) runs first from boot/recovery. It probes block devices, presents a hardware splash / recovery diagnostic, and mounts Debian rootfs before calling `switch_root`.
-
-### 2. Hardware Acceleration Pipeline
-* **Turnip over KGSL:** The downstream Android kernel does not provide DRM MSM render nodes (`renderD128`). We leverage Mesa Turnip's native KGSL backend (`TU_DEBUG=kgsl`) communicating directly with `/dev/kgsl-3d0`.
-* **Zink Desktop OpenGL:** Desktop OpenGL / GLES applications route through Mesa's Zink Gallium driver (`MESA_LOADER_DRIVER_OVERRIDE=zink`), translating OpenGL calls to Turnip Vulkan.
-
 ---
 
 ## Directory Structure
@@ -89,6 +135,7 @@ native-linux/
 │   ├── a70q-device/
 │   └── sm6150-common/
 ├── docs/                   # Exhaustive hardware audits and porting documentation
+│   ├── EXPERIMENTAL_RESEARCH_LOGS.md   # Complete deep-dive trial journal
 │   ├── ACTUAL_PARTITION_INVENTORY.md
 │   ├── BUILD_AND_TEST_GUIDE.md
 │   ├── DRIVER_COMPATIBILITY_MATRIX.md

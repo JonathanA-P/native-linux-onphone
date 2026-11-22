@@ -20,6 +20,7 @@ System.map
 # Image Binaries & Rootfs Archives (>50MB / GitHub size limits)
 artifacts/boot/*.img
 artifacts/boot/*.tar*
+artifacts/boot/unpacked_stock/
 artifacts/kernel/Image*
 artifacts/kernel/dtbo.img
 artifacts/rootfs/*.img*
