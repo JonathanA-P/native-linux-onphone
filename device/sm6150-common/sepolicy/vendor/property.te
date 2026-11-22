@@ -1,0 +1,5 @@
+# power
+vendor_internal_prop(vendor_power_prop)
+
+# qseecom
+vendor_internal_prop(vendor_qseecomd_prop)

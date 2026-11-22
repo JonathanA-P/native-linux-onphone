@@ -1,0 +1,45 @@
+# Security & Secrets (STRICT)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+certs/
+id_rsa*
+*.pfx
+
+# Large Kernel Source Tree & Build Artifacts
+kernel/sm6150-kernel/
+*.o
+*.ko
+*.mod*
+*.cmd
+vmlinux
+System.map
+
+# Image Binaries & Rootfs Archives (>50MB / GitHub size limits)
+artifacts/boot/*.img
+artifacts/boot/*.tar*
+artifacts/kernel/Image*
+artifacts/kernel/dtbo.img
+artifacts/rootfs/*.img*
+artifacts/rootfs/*.tar*
+*.img
+*.tar
+*.tar.*
+*.cpio.gz
+*.deb
+
+# Compiled Binaries & Intermediates
+init_build/init_elf
+initramfs/debian_splash
+initramfs/dualboot_init
+initramfs/boot_selector
+debian/build/
+
+# Logs & Temporary Files
+logs/
+*.log
+.DS_Store
+*.swp
+*~

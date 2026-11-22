@@ -1,0 +1,134 @@
+#!/bin/sh
+# ==============================================================================
+# Samsung Galaxy A70 (a70q) — Native Linux Early Boot Init Script
+# Secure Edition: Dropbear SSH (Public-Key Only) + Qualcomm DWC3 RNDIS
+# ==============================================================================
+
+# 1. Mount essential pseudo-filesystems
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts none /dev/pts
+
+echo "=========================================================="
+echo "  NATIVE DEBIAN 13 EARLY BOOT — SAMSUNG GALAXY A70 (a70q)"
+echo "=========================================================="
+
+# 2. Initialize Backlight & Display early
+# Hardware note: Aftermarket non-OLED replacement display with PM6150L WLED driver.
+if [ -d /sys/class/backlight/backlight ]; then
+    echo 2048 > /sys/class/backlight/backlight/brightness
+    echo "[init] Set PM6150L WLED backlight brightness to 2048"
+fi
+
+# 3. Setup USB ConfigFS Gadget (RNDIS for Emergency Recovery Console)
+echo "[init] Setting up USB ConfigFS RNDIS gadget..."
+mount -t configfs none /sys/kernel/config
+CONFIGFS_DIR=/sys/kernel/config/usb_gadget/g1
+
+mkdir -p $CONFIGFS_DIR
+cd $CONFIGFS_DIR
+
+echo 0x18d1 > idVendor    # Google
+echo 0xd001 > idProduct   # Android Composite / RNDIS
+mkdir -p strings/0x409
+echo "0123456789ABCDEF" > strings/0x409/serialnumber
+echo "Samsung" > strings/0x409/manufacturer
+echo "Galaxy A70 Debian" > strings/0x409/product
+
+mkdir -p configs/c.1/strings/0x409
+echo "RNDIS" > configs/c.1/strings/0x409/configuration
+
+mkdir -p functions/rndis.usb0
+ln -s functions/rndis.usb0 configs/c.1/
+
+# Find UDC driver (a600000.dwc3)
+UDC_DEV=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+if [ -n "$UDC_DEV" ]; then
+    echo "$UDC_DEV" > UDC
+    echo "[init] USB Gadget bound to $UDC_DEV"
+    
+    # Configure USB network interface
+    sleep 1
+    ifconfig rndis0 192.168.42.2 netmask 255.255.255.0 up 2>/dev/null || ifconfig usb0 192.168.42.2 netmask 255.255.255.0 up 2>/dev/null
+    echo "[init] Secure SSH rescue console available at 192.168.42.2:22"
+    
+    # Start Dropbear SSH server with public-key authentication ONLY (-s = no password, -g = no root password)
+    if [ -x /sbin/dropbear ]; then
+        /sbin/dropbear -R -s -g -p 192.168.42.2:22 -r /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null &
+    fi
+fi
+
+# 4. Locate and Mount Root Filesystem
+mkdir -p /sysroot
+ROOT_DEV=""
+
+# Wait up to 5 seconds for UFS block devices to register
+echo "[init] Waiting for block storage devices..."
+for i in 1 2 3 4 5; do
+    # Method A: Direct partition labeled DEBIAN_ROOT
+    ROOT_DEV=$(blkid 2>/dev/null | grep 'LABEL="DEBIAN_ROOT"' | cut -d: -f1 | head -n 1)
+    [ -n "$ROOT_DEV" ] && break
+
+    # Method B: Dedicated partition sda30 or by-name
+    if [ -b /dev/block/bootdevice/by-name/debian ]; then
+        ROOT_DEV="/dev/block/bootdevice/by-name/debian"
+        break
+    elif [ -b /dev/sda30 ]; then
+        ROOT_DEV="/dev/sda30"
+        break
+    fi
+
+    # Method C: Loop image inside unencrypted partition
+    # Note: Android userdata is F2FS with FBE encryption, so loopback on encrypted /data
+    # is only possible if an unencrypted staging partition or image is provided.
+    DATA_DEV="/dev/block/bootdevice/by-name/userdata"
+    [ -b "$DATA_DEV" ] || DATA_DEV="/dev/sda29"
+    if [ -b "$DATA_DEV" ]; then
+        mkdir -p /mnt_data
+        if mount -o ro "$DATA_DEV" /mnt_data 2>/dev/null; then
+            if [ -f /mnt_data/debian-rootfs.img ]; then
+                echo "[init] Found loop image /data/debian-rootfs.img"
+                ROOT_DEV=$(losetup -f --show /mnt_data/debian-rootfs.img)
+                break
+            fi
+            umount /mnt_data 2>/dev/null || true
+        fi
+    fi
+    sleep 1
+done
+
+# 5. Switch Root to Debian systemd
+if [ -n "$ROOT_DEV" ]; then
+    echo "[init] Mounting root filesystem from $ROOT_DEV..."
+    mount -o rw "$ROOT_DEV" /sysroot
+
+    INIT_BIN=""
+    if [ -x /sysroot/sbin/init ]; then
+        INIT_BIN="/sbin/init"
+    elif [ -x /sysroot/usr/lib/systemd/systemd ]; then
+        INIT_BIN="/usr/lib/systemd/systemd"
+    elif [ -x /sysroot/lib/systemd/systemd ]; then
+        INIT_BIN="/lib/systemd/systemd"
+    fi
+
+    if [ -n "$INIT_BIN" ]; then
+        echo "[init] Rootfs verified. Moving pseudo-filesystems and switching root to systemd ($INIT_BIN)..."
+        umount /dev/pts 2>/dev/null || true
+        mount --move /dev /sysroot/dev 2>/dev/null || true
+        mount --move /proc /sysroot/proc 2>/dev/null || true
+        mount --move /sys /sysroot/sys 2>/dev/null || true
+        exec switch_root /sysroot "$INIT_BIN"
+    else
+        echo "[ERROR] Init binary not found on $ROOT_DEV!"
+    fi
+else
+    echo "[ERROR] Could not find DEBIAN_ROOT partition or valid rootfs!"
+fi
+
+# Fallback emergency shell (local console only, no unauthenticated network telnet)
+echo "[init] Entering local emergency shell..."
+while true; do
+    /bin/sh
+done

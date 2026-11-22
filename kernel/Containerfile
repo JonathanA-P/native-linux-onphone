@@ -1,0 +1,9 @@
+FROM quay.io/droidian/build-essential:current-amd64
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bc kmod cpio bison flex libssl-dev lz4 rsync \
+    binutils-aarch64-linux-gnu \
+    clang-android-14.0-r450784d mkdtboimg && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV PATH=/usr/lib/llvm-android-14.0-r450784d/bin:$PATH

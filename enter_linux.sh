@@ -1,0 +1,1 @@
+/home/jonathan/Documents/Projects/Apps/a70/native-linux/scripts/connect_debian.sh

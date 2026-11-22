@@ -1,0 +1,160 @@
+#!/bin/sh
+# ==============================================================================
+# Samsung Galaxy A70 (a70q / SM6150) — Native Linux Diagnostic Init Script
+# Standalone Mode: Zero Rootfs Dependency / Secure Dropbear SSH / Hardware Discovery
+# ==============================================================================
+
+# 1. Mount essential pseudo-filesystems
+mount -t proc none /proc 2>/dev/null
+mount -t sysfs none /sys 2>/dev/null
+mount -t devtmpfs none /dev 2>/dev/null
+mkdir -p /dev/pts /dev/shm /var/log /var/run /tmp /config /sys/kernel/config
+mount -t devpts none /dev/pts 2>/dev/null
+mount -t tmpfs none /tmp 2>/dev/null
+
+echo "=========================================================="
+echo "  SAMSUNG GALAXY A70 (a70q) — NATIVE DIAGNOSTIC FIRST BOOT"
+echo "  Kernel: Linux 4.14.190-perf (Genuine ARM64 Native Boot)"
+echo "=========================================================="
+echo "[NATIVE-LINUX] Samsung Galaxy A70 Native Linux init started!" > /dev/kmsg 2>/dev/null
+
+# 2. Haptic Boot Signal (Vibrate for 300ms)
+echo 300 > /sys/class/timed_output/vibrator/enable 2>/dev/null
+
+# 3. Initialize Backlight & Display early
+for b in /sys/class/backlight/*/brightness; do
+    if [ -f "$b" ]; then
+        echo 200 > "$b" 2>/dev/null || echo 100 > "$b" 2>/dev/null
+        echo "[diag] Set backlight brightness on $b"
+    fi
+done
+
+# 4. Hardware & Storage Discovery (Log to /var/log/native_boot.log)
+LOGFILE="/var/log/native_boot.log"
+{
+    echo "=== NATIVE DIAGNOSTIC BOOT LOG ==="
+    echo "Date/Uptime: $(cat /proc/uptime 2>/dev/null)"
+    echo "Kernel Cmdline: $(cat /proc/cmdline 2>/dev/null)"
+    echo "CPU Info:"
+    cat /proc/cpuinfo 2>/dev/null | grep -E "Processor|model name|Features|CPU implementer|CPU part" | head -n 16
+    echo "Memory:"
+    cat /proc/meminfo 2>/dev/null | head -n 8
+    echo "Partition Table:"
+    cat /proc/partitions 2>/dev/null
+    echo "Block Devices:"
+    ls -la /dev/sda* /dev/sdd* 2>/dev/null
+    echo "Backlight Nodes:"
+    ls -la /sys/class/backlight/ 2>/dev/null
+    echo "DRM Nodes:"
+    ls -la /sys/class/drm/ 2>/dev/null
+    echo "UDC Devices:"
+    ls -la /sys/class/udc/ 2>/dev/null
+    echo "Input Nodes:"
+    cat /proc/bus/input/devices 2>/dev/null
+    echo "Thermal Zones:"
+    for t in /sys/class/thermal/thermal_zone*; do
+        if [ -f "$t/temp" ]; then
+            echo "$(basename "$t") ($(cat "$t/type" 2>/dev/null)): $(cat "$t/temp" 2>/dev/null)"
+        fi
+    done
+    echo "Power Supply:"
+    for p in /sys/class/power_supply/*; do
+        if [ -d "$p" ]; then
+            echo "Device: $(basename "$p") | Status: $(cat "$p/status" 2>/dev/null) | Capacity: $(cat "$p/capacity" 2>/dev/null)%"
+        fi
+    done
+} > "$LOGFILE" 2>&1
+echo "[diag] Hardware discovery logged to $LOGFILE"
+
+# 5. Setup USB ConfigFS Gadget (RNDIS for Secure SSH Recovery Console)
+echo "[diag] Setting up USB ConfigFS RNDIS gadget..."
+mount -t configfs none /config 2>/dev/null || mount -t configfs none /sys/kernel/config 2>/dev/null
+
+CONFIGFS_DIR=""
+if [ -d /config ]; then
+    CONFIGFS_DIR="/config/usb_gadget/g1"
+elif [ -d /sys/kernel/config ]; then
+    CONFIGFS_DIR="/sys/kernel/config/usb_gadget/g1"
+fi
+
+if [ -n "$CONFIGFS_DIR" ]; then
+    mkdir -p "$CONFIGFS_DIR"
+    cd "$CONFIGFS_DIR"
+
+    # Reset any active UDC
+    [ -f UDC ] && echo "" > UDC 2>/dev/null
+
+    echo 0x18d1 > idVendor    # Google
+    echo 0xd001 > idProduct   # Android Composite / RNDIS
+    mkdir -p strings/0x409
+    echo "RR8M50J37GY" > strings/0x409/serialnumber
+    echo "Samsung" > strings/0x409/manufacturer
+    echo "Galaxy A70 Native Linux Diag" > strings/0x409/product
+
+    # Setup configuration b.1 and c.1 for compatibility
+    mkdir -p configs/b.1/strings/0x409
+    echo "RNDIS" > configs/b.1/strings/0x409/configuration
+    echo 500 > configs/b.1/MaxPower 2>/dev/null
+
+    mkdir -p configs/c.1/strings/0x409
+    echo "RNDIS" > configs/c.1/strings/0x409/configuration
+    echo 500 > configs/c.1/MaxPower 2>/dev/null
+
+    # Create network function (rndis or fallback ncm)
+    for f in rndis.usb0 rndis.0 rndis.rndis; do
+        if mkdir -p "functions/$f" 2>/dev/null; then
+            ln -sf "$CONFIGFS_DIR/functions/$f" "$CONFIGFS_DIR/configs/b.1/" 2>/dev/null
+            ln -sf "$CONFIGFS_DIR/functions/$f" "$CONFIGFS_DIR/configs/c.1/" 2>/dev/null
+            echo "[diag] Linked network function $f"
+            break
+        fi
+    done
+
+    # Bind UDC driver
+    UDC_DEV=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+    [ -z "$UDC_DEV" ] && UDC_DEV="a600000.dwc3"
+    if [ -n "$UDC_DEV" ]; then
+        echo "$UDC_DEV" > UDC 2>/dev/null
+        echo "[diag] USB Gadget bound to UDC: $UDC_DEV"
+    else
+        echo "[ERROR] No UDC device found in /sys/class/udc!"
+    fi
+else
+    echo "[ERROR] Could not mount configfs!"
+fi
+
+# Configure network interfaces
+sleep 1
+for iface in rndis0 usb0 eth0; do
+    if ifconfig "$iface" 192.168.42.2 netmask 255.255.255.0 up 2>/dev/null; then
+        echo "[diag] Network interface $iface configured: 192.168.42.2/24"
+    fi
+done
+
+# Start Dropbear SSH server (Port 22)
+if [ -x /sbin/dropbear ]; then
+    /sbin/dropbear -R -s -g -p 0.0.0.0:22 -r /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null &
+    echo "[diag] Dropbear SSH running on 0.0.0.0:22"
+fi
+
+# Start Telnet server (Port 23) as passwordless emergency console
+if [ -x /bin/busybox ]; then
+    /bin/busybox telnetd -l /bin/sh -b 0.0.0.0 -p 23 2>/dev/null &
+    echo "[diag] Busybox Telnetd running on 0.0.0.0:23"
+fi
+
+# Capture kernel dmesg
+dmesg > /var/log/dmesg.log 2>&1
+
+echo "=========================================================="
+echo "  DIAGNOSTIC SYSTEM READY"
+echo "  Connect from Fedora host: ssh -i ~/.ssh/id_ed25519 root@192.168.42.2"
+echo "  Or telnet 192.168.42.2 23"
+echo "=========================================================="
+
+# 6. Diagnostic Watchdog & Shell Loop
+while true; do
+    echo ""
+    echo "A70-Native-Linux-Diag login (authenticated SSH on 192.168.42.2:22 active)"
+    /bin/sh
+done
